@@ -1,88 +1,48 @@
+# ==========================================
 import os
-import glob
 import subprocess
-import shutil
+import pydub
 
-# ==========================================
-# 1. 경로 및 작업 환경 설정
-# ==========================================
-MODEL_NAME = "my_voice_model"
-DATASET_DIR = "./dataset/my_voice"
-INPUT_DIR = "./inputs"
-OUTPUT_DIR = "./outputs"
+# 1~6번 음원 데이터셋 통합
+def prepare_dataset(audio_files, output_dir="dataset"):
+    os.makedirs(output_dir, exist_ok=True)
+    combined = pydub.AudioSegment.empty()
+    
+    for file_path in audio_files:
+        if os.path.exists(file_path):
+            sound = pydub.AudioSegment.from_file(file_path)
+            combined += sound
+            
+    output_path = os.path.join(output_dir, "combined_vocal.wav")
+    combined.export(output_path, format="wav")
+    print(f"[+] 데이터셋 통합 완료: {output_path}")
+    return output_path
 
-# 필요한 디렉토리 생성
-os.makedirs(DATASET_DIR, exist_ok=True)
-os.makedirs(INPUT_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ==========================================
-# 2. 파일 정리 (목소리 3개 -> 학습용, 마지막 1개 -> 타겟 노래)
-# ==========================================
-# 감지할 음성 확장자 (.wav, .m4a, .mp3)
-audio_files = sorted([f for f in os.listdir('.') if f.endswith(('.wav', '.m4a', '.mp3', '.ogg'))])
-
-if len(audio_files) < 4:
-    print(f"❌ 작업에 필요한 파일이 부족합니다. 현재 폴더에 최소 4개의 음성 파일이 필요합니다. (현재: {len(audio_files)}개)")
-    exit()
-
-# 앞 3개 파일: 학습용 데이터셋 폴더로 이동
-train_files = audio_files[:3]
-target_song = audio_files[3]
-
-print(f"🎙️ 학습용 목소리 파일: {train_files}")
-print(f"🎵 커버할 대상 노래 파일: {target_song}\n")
-
-for f in train_files:
-    shutil.copy(f, os.path.join(DATASET_DIR, f))
-
-shutil.copy(target_song, os.path.join(INPUT_DIR, target_song))
-
-# ==========================================
-# 3. RVC 모델 학습 (Train)
-# ==========================================
-print("🔄 1/3: 음성 데이터 전처리 중...")
-subprocess.run([
-    "python", "trainset_preprocess_pipeline_2print.py",
-    DATASET_DIR,
-    "40k",       # 샘플링 레이트
-    "8",         # CPU 스레드 수
-    f"./logs/{MODEL_NAME}",
-    "False"
-], check=True)
-
-print("🔄 2/3: 음성 특징(Feature & Pitch) 추출 중...")
-subprocess.run([
-    "python", "extract_feature_print.py",
-    "cuda:0", "1", "0", "0",
-    f"./logs/{MODEL_NAME}",
-    "v2"
-], check=True)
-
-# 간이 학습 실행 (데이터가 적으므로 epoch 수를 적절히 조정)
-print("🚀 3/3: AI 모델 학습 진행 중...")
-# train_nsf_sims.py 호출을 통해 .pth 모델 파일 생성
-
-# ==========================================
-# 4. AI 목소리 커버 추론 (Inference)
-# ==========================================
-model_pth = f"./weights/{MODEL_NAME}.pth"
-index_file = f"./logs/{MODEL_NAME}/added_IVF256_Flat_nprobe_1_{MODEL_NAME}_v2.index"
-input_audio_path = os.path.join(INPUT_DIR, target_song)
-output_audio_path = os.path.join(OUTPUT_DIR, f"cover_{target_song}.wav")
-
-print("\n🎤 AI 보컬 변환(커버)을 시작합니다...")
-
-cmd = [
-    "python", "tools/infer_cli.py",
-    "--f0up_key", "0",                  # 음높이 조절 (원곡 키 그대로: 0, 여성->남성: -12)
-    "--input_path", input_audio_path,
-    "--index_path", index_file if os.path.exists(index_file) else "",
-    "--opt_path", output_audio_path,
-    "--model_name", model_pth,
-    "--f0method", "rmvpe"               # 피치 추출 알고리즘
-]
-
-subprocess.run(cmd, check=True)
-print(f"\n🎉 커버 완료! 결과 파일 저장 위치: {output_audio_path}")# import streamlit as st
-                
+# 7번 음원 커버 변환 및 MR 합성
+def generate_ai_cover(target_audio_path, model_path, output_path="output/final_cover.mp3"):
+    os.makedirs("output", exist_ok=True)
+    
+    vocal_path = "output/vocal.wav"
+    mr_path = "output/mr.wav"
+    converted_vocal_path = "output/converted_vocal.wav"
+    
+    # Step 1: 음원 분리 (UVR5 CLI 실행 예시)
+    subprocess.run(
+        f"python -m uvr5.separate --input {target_audio_path} --out_vocal {vocal_path} --out_mr {mr_path}",
+        shell=True
+    )
+    
+    # Step 2: RVC 모델로 보컬 변환 (Voice Conversion)
+    subprocess.run(
+        f"python -m rvc.infer --model {model_path} --input {vocal_path} --output {converted_vocal_path}",
+        shell=True
+    )
+    
+    # Step 3: 변환된 보컬 + original MR 합성
+    vocal = pydub.AudioSegment.from_file(converted_vocal_path)
+    mr = pydub.AudioSegment.from_file(mr_path)
+    
+    final_cover = mr.overlay(vocal)
+    final_cover.export(output_path, format="mp3")
+    
+    return output_path
