@@ -1,0 +1,70 @@
+import streamlit as st
+import os
+from pipeline import generate_ai_cover
+
+# 페이지 기본 설정
+st.set_page_config(
+    page_title="AI Vocal Cover Studio",
+    page_icon="🎵",
+    layout="centered"
+)
+
+st.title("🎵 AI 보컬 커버곡 생성 및 다운로드")
+st.markdown("---")
+st.write("학습된 음성 모델을 활용해 7번 타깃 곡을 AI 커버곡으로 변환하고 다운로드하세요.")
+
+# 경로 및 파일 지정
+MODEL_PATH = "weights/trained_vocal_model.pth"
+TARGET_SONG_PATH = "data/7_target_song.mp3"
+OUTPUT_COVER_PATH = "output/final_ai_cover.mp3"
+
+# 파라미터 세부 조절 (사이드바)
+st.sidebar.header("⚙️ 커버 옵션 설정")
+pitch_shift = st.sidebar.slider("키/피치 조절 (Key Shift)", -12, 12, 0, help="남성/여성키 변환 시 조절")
+index_rate = st.sidebar.slider("음색 유사도 반영 비율", 0.0, 1.0, 0.75)
+
+st.subheader("1. AI 커버 변환 시작")
+if st.button("🚀 7번 곡 커버 생성하기", use_container_width=True):
+    if not os.path.exists(MODEL_PATH):
+        st.error(f"학습된 모델 파일({MODEL_PATH})을 찾을 수 없습니다. 모델을 먼저 학습시켜 주세요.")
+    elif not os.path.exists(TARGET_SONG_PATH):
+        st.error(f"7번 타깃 음원 파일({TARGET_SONG_PATH})을 찾을 수 없습니다.")
+    else:
+        with st.spinner("음원 분리, AI 음성 변환 및 최종 음원 합성 진행 중..."):
+            try:
+                # 커버 음원 생성 실행
+                result_file = generate_ai_cover(
+                    target_audio_path=TARGET_SONG_PATH,
+                    model_path=MODEL_PATH,
+                    output_path=OUTPUT_COVER_PATH
+                )
+                st.session_state["cover_file"] = result_file
+                st.success("🎉 AI 커버곡 생성이 완료되었습니다!")
+            except Exception as e:
+                st.error(f"커버 생성 도중 오류가 발생했습니다: {e}")
+
+# 결과 확인 및 다운로드 영역
+st.markdown("---")
+st.subheader("2. 감상 및 다운로드")
+
+if "cover_file" in st.session_state and os.path.exists(st.session_state["cover_file"]):
+    file_path = st.session_state["cover_file"]
+    
+    # 1) 스트림릿 내 오디오 플레이어 재생
+    st.markdown("#### 🎧 커버곡 미리듣기")
+    with open(file_path, "rb") as audio_file:
+        audio_bytes = audio_file.read()
+        st.audio(audio_bytes, format="audio/mp3")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 2) 파일 다운로드 버튼
+    st.download_button(
+        label="📥 AI 커버곡 MP3 다운로드",
+        data=audio_bytes,
+        file_name="AI_Cover_Song.mp3",
+        mime="audio/mp3",
+        use_container_width=True
+    )
+else:
+    st.info("위 버튼을 눌러 커버곡을 먼저 생성해주세요.")
