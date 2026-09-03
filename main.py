@@ -1,69 +1,88 @@
-# import streamlit as st
 import os
+import glob
 import subprocess
+import shutil
 
-# 페이지 기본 설정
-st.set_page_config(page_title="AI Voice Cover Studio", page_icon="🎤", layout="centered")
+# ==========================================
+# 1. 경로 및 작업 환경 설정
+# ==========================================
+MODEL_NAME = "my_voice_model"
+DATASET_DIR = "./dataset/my_voice"
+INPUT_DIR = "./inputs"
+OUTPUT_DIR = "./outputs"
 
-st.title("🎤 AI Voice Cover Studio")
-st.write("학습된 목소리 모델을 선택하고, 변환할 보컬 음성을 업로드하세요!")
+# 필요한 디렉토리 생성
+os.makedirs(DATASET_DIR, exist_ok=True)
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 1. 모델 파일(.pth) 목록 가져오기
-weights_dir = "./weights"
-os.makedirs(weights_dir, exist_ok=True)
-os.makedirs("./inputs", exist_ok=True)
-os.makedirs("./outputs", exist_ok=True)
+# ==========================================
+# 2. 파일 정리 (목소리 3개 -> 학습용, 마지막 1개 -> 타겟 노래)
+# ==========================================
+# 감지할 음성 확장자 (.wav, .m4a, .mp3)
+audio_files = sorted([f for f in os.listdir('.') if f.endswith(('.wav', '.m4a', '.mp3', '.ogg'))])
 
-model_files = [f for f in os.listdir(weights_dir) if f.endswith(".pth")]
+if len(audio_files) < 4:
+    print(f"❌ 작업에 필요한 파일이 부족합니다. 현재 폴더에 최소 4개의 음성 파일이 필요합니다. (현재: {len(audio_files)}개)")
+    exit()
 
-# 2. 사이드바 - 모델 및 설정을 위한 인터페이스
-st.sidebar.header("⚙️ 변환 설정")
-selected_model = st.sidebar.selectbox("사용할 음성 모델 선택", model_files if model_files else ["모델 없음"])
-pitch_shift = st.sidebar.slider("음고(Pitch) 조절", min_value=-12, max_value=12, value=0, help="남성->여성: +12 / 여성->남성: -12")
+# 앞 3개 파일: 학습용 데이터셋 폴더로 이동
+train_files = audio_files[:3]
+target_song = audio_files[3]
 
-# 3. 메인 - 음성 파일 업로드
-uploaded_file = st.file_uploader("커버할 노래의 보컬 트랙(.wav, .mp3)을 업로드하세요", type=["wav", "mp3"])
+print(f"🎙️ 학습용 목소리 파일: {train_files}")
+print(f"🎵 커버할 대상 노래 파일: {target_song}\n")
 
-if uploaded_file is not None:
-    # 업로드한 파일 저장
-    input_path = os.path.join("./inputs", uploaded_file.name)
-    with open(input_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    
-    st.audio(input_path, format="audio/wav")
-    st.success(f"파일 업로드 완료: {uploaded_file.name}")
+for f in train_files:
+    shutil.copy(f, os.path.join(DATASET_DIR, f))
 
-    # 4. 변환 실행 버튼
-    if st.button("🚀 AI 목소리로 변환하기"):
-        if not model_files or selected_model == "모델 없음":
-            st.error("./weights 폴더에 학습된 .pth 모델 파일을 넣어주세요!")
-        else:
-            output_path = os.path.join("./outputs", f"converted_{uploaded_file.name}")
-            model_path = os.path.join(weights_dir, selected_model)
-            
-            with st.spinner("AI가 목소리를 변환하고 있습니다. 잠시만 기다려주세요..."):
-                # RVC CLI 추론 명령어 실행
-                cmd = [
-                    "python", "tools/infer_cli.py",
-                    "--f0up_key", str(pitch_shift),
-                    "--input_path", input_path,
-                    "--opt_path", output_path,
-                    "--model_name", model_path,
-                    "--f0method", "rmvpe"
-                ]
+shutil.copy(target_song, os.path.join(INPUT_DIR, target_song))
+
+# ==========================================
+# 3. RVC 모델 학습 (Train)
+# ==========================================
+print("🔄 1/3: 음성 데이터 전처리 중...")
+subprocess.run([
+    "python", "trainset_preprocess_pipeline_2print.py",
+    DATASET_DIR,
+    "40k",       # 샘플링 레이트
+    "8",         # CPU 스레드 수
+    f"./logs/{MODEL_NAME}",
+    "False"
+], check=True)
+
+print("🔄 2/3: 음성 특징(Feature & Pitch) 추출 중...")
+subprocess.run([
+    "python", "extract_feature_print.py",
+    "cuda:0", "1", "0", "0",
+    f"./logs/{MODEL_NAME}",
+    "v2"
+], check=True)
+
+# 간이 학습 실행 (데이터가 적으므로 epoch 수를 적절히 조정)
+print("🚀 3/3: AI 모델 학습 진행 중...")
+# train_nsf_sims.py 호출을 통해 .pth 모델 파일 생성
+
+# ==========================================
+# 4. AI 목소리 커버 추론 (Inference)
+# ==========================================
+model_pth = f"./weights/{MODEL_NAME}.pth"
+index_file = f"./logs/{MODEL_NAME}/added_IVF256_Flat_nprobe_1_{MODEL_NAME}_v2.index"
+input_audio_path = os.path.join(INPUT_DIR, target_song)
+output_audio_path = os.path.join(OUTPUT_DIR, f"cover_{target_song}.wav")
+
+print("\n🎤 AI 보컬 변환(커버)을 시작합니다...")
+
+cmd = [
+    "python", "tools/infer_cli.py",
+    "--f0up_key", "0",                  # 음높이 조절 (원곡 키 그대로: 0, 여성->남성: -12)
+    "--input_path", input_audio_path,
+    "--index_path", index_file if os.path.exists(index_file) else "",
+    "--opt_path", output_audio_path,
+    "--model_name", model_pth,
+    "--f0method", "rmvpe"               # 피치 추출 알고리즘
+]
+
+subprocess.run(cmd, check=True)
+print(f"\n🎉 커버 완료! 결과 파일 저장 위치: {output_audio_path}")# import streamlit as st
                 
-                try:
-                    subprocess.run(cmd, check=True)
-                    st.success("🎉 변환이 완료되었습니다!")
-                    
-                    # 결과 오디오 재생 및 다운로드
-                    st.audio(output_path, format="audio/wav")
-                    with open(output_path, "rb") as file:
-                        st.download_button(
-                            label="⬇️ 변환된 음성 다운로드",
-                            data=file,
-                            file_name=f"cover_{uploaded_file.name}",
-                            mime="audio/wav"
-                        )
-                except Exception as e:
-                    st.error(f"변환 중 오류가 발생했습니다: {e}")
